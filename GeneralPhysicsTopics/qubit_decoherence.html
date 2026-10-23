@@ -1,0 +1,245 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Qubit decoherence</title>
+<!--
+  Qubit decoherence simulator (Bloch sphere + quantum trajectories)
+
+  Physics
+  -------
+  A single qubit coupled to an environment, described by the Lindblad master equation
+      dρ/dt = -i[H, ρ] + Γ1 D[σ-]ρ + (Γφ/2) D[σz]ρ,   H = (ω/2) σz
+  with Γ1 = 1/T1 (energy relaxation) and Γφ = 1/Tφ (pure dephasing).
+  The coherence decays with 1/T2 = 1/(2 T1) + 1/Tφ.
+
+  The master equation is "unravelled" into an ensemble of stochastic pure-state
+  trajectories (Monte Carlo wave function method):
+    * relaxation  -> quantum jumps to |0> with probability Γ1 |β|² dt,
+                     otherwise non-Hermitian decay of the |1> amplitude + renormalisation
+    * dephasing   -> random phase kicks with variance 2 Γφ dt (phase diffusion)
+  Averaging the Bloch vectors of all trajectories gives the density matrix ρ,
+  which is compared against the analytic Lindblad solution (dashed curves).
+
+  Open this file in any modern browser. No dependencies.
+-->
+<style>
+:root{
+  --text-primary:#1f1e1b;--text-secondary:#5f5e5a;--text-muted:#888780;
+  --border:rgba(0,0,0,.12);--border-strong:rgba(0,0,0,.25);
+  --surface-0:#faf9f5;--surface-1:#f1efe8;--surface-2:#ffffff;--radius:8px;
+  --font-sans:system-ui,-apple-system,"Segoe UI",Roboto,sans-serif;
+  --font-mono:ui-monospace,SFMono-Regular,Menlo,monospace;
+}
+@media (prefers-color-scheme: dark){:root{
+  --text-primary:#f1efe8;--text-secondary:#b4b2a9;--text-muted:#888780;
+  --border:rgba(255,255,255,.14);--border-strong:rgba(255,255,255,.28);
+  --surface-0:#1f1e1b;--surface-1:#2c2c2a;--surface-2:#262624;
+}}
+*{box-sizing:border-box}
+body{margin:0;background:var(--surface-0);color:var(--text-primary);font-family:var(--font-sans)}
+main{max-width:760px;margin:0 auto;padding:24px 16px 40px}
+h1{font-size:22px;font-weight:500;margin:0 0 4px}
+.sub{font-size:14px;color:var(--text-secondary);margin:0 0 16px}
+button{font:inherit;font-size:13px;color:var(--text-primary);background:transparent;border:.5px solid var(--border-strong);border-radius:var(--radius);padding:6px 12px;cursor:pointer}
+button:hover{background:var(--surface-1)}
+input[type=range]{accent-color:#7F77DD}
+.row{display:flex;align-items:center;gap:10px;font-size:13px;color:var(--text-secondary)}
+.row label{min-width:136px}.row span{min-width:52px;font-weight:500;color:var(--text-primary);text-align:right}
+.mc{background:var(--surface-1);border-radius:var(--radius);padding:8px 10px}
+.mc .l{font-size:12px;color:var(--text-secondary)}.mc .v{font-size:18px;font-weight:500}
+.cell{border:.5px solid var(--border);border-radius:var(--radius);padding:8px;text-align:center;font-size:13px;font-family:var(--font-mono)}
+.two{display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1fr);gap:16px;align-items:start}
+@media (max-width:600px){.two{grid-template-columns:minmax(0,1fr)}}
+</style>
+</head>
+<body>
+<main>
+<h1>Qubit decoherence</h1>
+<p class="sub">Ensemble of stochastic quantum trajectories vs. the Lindblad master equation.</p>
+
+<div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(300px,1fr));gap:6px 20px;padding:0.5rem 0 1rem">
+<div class="row"><label>T₁ relaxation (μs)</label><input type="range" id="t1" min="1" max="60" step="1" value="20" style="flex:1"><span id="t1o"></span></div>
+<div class="row"><label>T_φ dephasing (μs)</label><input type="range" id="tp" min="1" max="100" step="1" value="8" style="flex:1"><span id="tpo"></span></div>
+<div class="row"><label>Precession ω (rad/μs)</label><input type="range" id="om" min="0" max="2" step="0.05" value="0.6" style="flex:1"><span id="omo"></span></div>
+<div class="row"><label>Initial angle θ</label><input type="range" id="th" min="0" max="180" step="5" value="90" style="flex:1"><span id="tho"></span></div>
+<div class="row"><label>Trajectories</label><input type="range" id="nn" min="10" max="500" step="10" value="200" style="flex:1"><span id="nno"></span></div>
+<div style="display:flex;gap:8px;justify-content:flex-end"><button id="play">Pause</button><button id="rst">Reset</button></div>
+</div>
+
+<div class="two">
+<div><canvas id="bs" style="width:100%;height:320px;cursor:grab;touch-action:none"></canvas><div style="font-size:12px;color:var(--text-muted);text-align:center">Drag to rotate</div></div>
+<div>
+<div style="display:grid;grid-template-columns:1fr 1fr;gap:8px;margin-bottom:12px">
+<div class="mc"><div class="l">Time</div><div class="v" id="mt">0 μs</div></div>
+<div class="mc"><div class="l">T₂ (derived)</div><div class="v" id="mt2">–</div></div>
+<div class="mc"><div class="l">Coherence |ρ₀₁|</div><div class="v" id="mc">–</div></div>
+<div class="mc"><div class="l">Purity Tr ρ²</div><div class="v" id="mp">–</div></div>
+</div>
+<div style="font-size:12px;color:var(--text-secondary);margin-bottom:6px">Ensemble density matrix ρ</div>
+<div style="display:grid;grid-template-columns:1fr 1fr;gap:6px">
+<div class="cell" id="r00"></div><div class="cell" id="r01"></div><div class="cell" id="r10"></div><div class="cell" id="r11"></div>
+</div>
+<div style="font-size:12px;color:var(--text-muted);margin-top:8px;line-height:1.5">Off-diagonals = coherence, diagonals = populations. Tint shows magnitude.</div>
+</div>
+</div>
+
+<canvas id="pl" style="width:100%;height:220px;margin-top:1rem"></canvas>
+<div style="display:flex;gap:16px;flex-wrap:wrap;font-size:12px;color:var(--text-secondary);margin-top:4px">
+<span><span style="display:inline-block;width:14px;height:3px;background:#7F77DD;vertical-align:middle"></span> Coherence 2|ρ₀₁|</span>
+<span><span style="display:inline-block;width:14px;height:3px;background:#1D9E75;vertical-align:middle"></span> Excited population ρ₁₁</span>
+<span><span style="display:inline-block;width:14px;height:3px;background:#D85A30;vertical-align:middle"></span> Purity</span>
+<span>Solid = ensemble, dashed = Lindblad master equation</span>
+</div>
+</main>
+
+<script>
+const $ = id => document.getElementById(id);
+const P = {}, TMAX = 40, DT = 0.01;     // time in μs, integration step dt
+let traj = [], t = 0, running = true, hist = [], az = 0.6;
+const EL = 0.35;                         // camera elevation (rad)
+
+// ---- parameters -----------------------------------------------------------
+function rd() {
+  P.t1 = +$('t1').value; P.tp = +$('tp').value; P.om = +$('om').value;
+  P.th = +$('th').value * Math.PI / 180; P.n = +$('nn').value;
+  $('t1o').textContent = P.t1; $('tpo').textContent = P.tp;
+  $('omo').textContent = P.om.toFixed(2); $('tho').textContent = $('th').value + '°';
+  $('nno').textContent = P.n;
+  P.t2 = 1 / (1 / (2 * P.t1) + 1 / P.tp);            // 1/T2 = 1/(2T1) + 1/Tφ
+  $('mt2').textContent = P.t2.toFixed(1) + ' μs';
+}
+
+// Box–Muller standard normal
+function gauss() { const u = 1 - Math.random(), v = Math.random();
+  return Math.sqrt(-2 * Math.log(u)) * Math.cos(2 * Math.PI * v); }
+
+// ---- trajectories: |ψ> = α|0> + β|1>, stored as (ar, ai, br, bi) ---------
+function reset() {
+  rd(); t = 0; hist = []; traj = [];
+  for (let i = 0; i < P.n; i++)
+    traj.push({ ar: Math.cos(P.th / 2), ai: 0, br: Math.sin(P.th / 2), bi: 0 });
+  rec();
+}
+
+function step() {
+  const g1 = 1 / P.t1, gp = 1 / P.tp, s = Math.sqrt(2 * gp * DT);
+  for (const q of traj) {
+    const pe = q.br * q.br + q.bi * q.bi;
+    // quantum jump (spontaneous emission) |1> -> |0>
+    if (Math.random() < g1 * pe * DT) { q.ar = 1; q.ai = 0; q.br = 0; q.bi = 0; continue; }
+    // coherent precession + stochastic phase kick + no-jump decay of β
+    const ph = -P.om * DT + s * gauss(), c = Math.cos(ph), sn = Math.sin(ph), d = Math.exp(-g1 * DT / 2);
+    const br = (q.br * c - q.bi * sn) * d, bi = (q.br * sn + q.bi * c) * d;
+    const nrm = Math.sqrt(q.ar * q.ar + q.ai * q.ai + br * br + bi * bi);
+    q.ar /= nrm; q.ai /= nrm; q.br = br / nrm; q.bi = bi / nrm;
+  }
+  t += DT;
+}
+
+// Bloch vector (x, y, z) of a pure state
+function bloch(q) {
+  const re = q.ar * q.br + q.ai * q.bi, im = q.ar * q.bi - q.ai * q.br;
+  return [2 * re, 2 * im, q.ar * q.ar + q.ai * q.ai - q.br * q.br - q.bi * q.bi];
+}
+function mean() {
+  const m = [0, 0, 0];
+  for (const q of traj) { const b = bloch(q); m[0] += b[0]; m[1] += b[1]; m[2] += b[2]; }
+  return m.map(v => v / traj.length);
+}
+
+// Analytic Lindblad solution
+function ana(tt) {
+  const rp = Math.sin(P.th) * Math.exp(-tt / P.t2), z0 = Math.cos(P.th),
+        z = 1 - (1 - z0) * Math.exp(-tt / P.t1);
+  return { coh: rp, pe: (1 - z) / 2, pur: (1 + rp * rp + z * z) / 2 };
+}
+function rec() {
+  const m = mean(), rp = Math.hypot(m[0], m[1]);
+  hist.push({ t, coh: rp, pe: (1 - m[2]) / 2, pur: (1 + rp * rp + m[2] * m[2]) / 2, m });
+}
+
+// ---- drawing ----------------------------------------------------------------
+function col(n) { return getComputedStyle(document.documentElement).getPropertyValue(n).trim() || '#888'; }
+function setup(c) {
+  const d = window.devicePixelRatio || 1, r = c.getBoundingClientRect();
+  c.width = r.width * d; c.height = r.height * d;
+  const x = c.getContext('2d'); x.setTransform(d, 0, 0, d, 0, 0); return [x, r.width, r.height];
+}
+function proj(p, cx, cy, R) {
+  const x1 = p[0] * Math.cos(az) - p[1] * Math.sin(az), y1 = p[0] * Math.sin(az) + p[1] * Math.cos(az);
+  return [cx + R * x1, cy - R * (p[2] * Math.cos(EL) + y1 * Math.sin(EL)), y1 * Math.cos(EL) - p[2] * Math.sin(EL)];
+}
+function drawB() {
+  const [x, w, h] = setup($('bs'));
+  const cx = w / 2, cy = h / 2, R = Math.min(w, h) / 2 - 28, tx = col('--text-secondary'), bd = col('--border-strong');
+  x.strokeStyle = bd; x.lineWidth = 1;
+  x.beginPath(); x.arc(cx, cy, R, 0, 2 * Math.PI); x.stroke();
+  x.beginPath();
+  for (let i = 0; i <= 64; i++) { const a = i / 64 * 2 * Math.PI, p = proj([Math.cos(a), Math.sin(a), 0], cx, cy, R);
+    i ? x.lineTo(p[0], p[1]) : x.moveTo(p[0], p[1]); }
+  x.stroke();
+  x.font = '12px sans-serif'; x.fillStyle = tx; x.setLineDash([3, 3]);
+  [[[0, 0, 1], '|0⟩'], [[0, 0, -1], '|1⟩'], [[1, 0, 0], 'x'], [[0, 1, 0], 'y']].forEach(([v, l]) => {
+    const a = proj(v.map(k => -k), cx, cy, R), b = proj(v, cx, cy, R);
+    x.beginPath(); x.moveTo(a[0], a[1]); x.lineTo(b[0], b[1]); x.stroke();
+    const o = proj(v.map(k => k * 1.13), cx, cy, R); x.fillText(l, o[0] - 8, o[1] + 4);
+  });
+  x.setLineDash([]);
+  for (const q of traj) { const p = proj(bloch(q), cx, cy, R);
+    x.fillStyle = p[2] > 0 ? 'rgba(127,119,221,0.35)' : 'rgba(127,119,221,0.75)';
+    x.beginPath(); x.arc(p[0], p[1], 2.2, 0, 2 * Math.PI); x.fill(); }
+  x.strokeStyle = 'rgba(216,90,48,0.45)'; x.lineWidth = 1.2; x.beginPath();
+  hist.forEach((hh, i) => { const p = proj(hh.m, cx, cy, R); i ? x.lineTo(p[0], p[1]) : x.moveTo(p[0], p[1]); });
+  x.stroke();
+  const m = hist[hist.length - 1].m, p = proj(m, cx, cy, R);
+  x.strokeStyle = '#D85A30'; x.lineWidth = 2.5; x.beginPath(); x.moveTo(cx, cy); x.lineTo(p[0], p[1]); x.stroke();
+  x.fillStyle = '#D85A30'; x.beginPath(); x.arc(p[0], p[1], 4.5, 0, 2 * Math.PI); x.fill();
+}
+function drawP() {
+  const [x, w, h] = setup($('pl'));
+  const L = 36, B = 24, T = 8, Rr = 8, pw = w - L - Rr, ph = h - T - B, tx = col('--text-secondary'), bd = col('--border');
+  const X = v => L + v / TMAX * pw, Y = v => T + (1 - v) * ph;
+  x.font = '11px sans-serif'; x.fillStyle = tx; x.strokeStyle = bd; x.lineWidth = 0.5;
+  for (let v = 0; v <= 1; v += 0.25) { x.beginPath(); x.moveTo(L, Y(v)); x.lineTo(w - Rr, Y(v)); x.stroke(); x.fillText(v.toFixed(2), 4, Y(v) + 4); }
+  for (let v = 0; v <= TMAX; v += 10) x.fillText(v + (v ? '' : ' μs'), X(v) - 4, h - 6);
+  [['coh', '#7F77DD'], ['pe', '#1D9E75'], ['pur', '#D85A30']].forEach(([k, c]) => {
+    x.strokeStyle = c; x.lineWidth = 1.3; x.setLineDash([5, 4]); x.beginPath();
+    for (let i = 0; i <= 200; i++) { const tt = i / 200 * TMAX, v = ana(tt)[k]; i ? x.lineTo(X(tt), Y(v)) : x.moveTo(X(tt), Y(v)); }
+    x.stroke();
+    x.setLineDash([]); x.lineWidth = 2; x.beginPath();
+    hist.forEach((hh, i) => { i ? x.lineTo(X(hh.t), Y(hh[k])) : x.moveTo(X(hh.t), Y(hh[k])); });
+    x.stroke();
+  });
+}
+function cell(id, lab, v, mag) {
+  const e = $(id);
+  e.innerHTML = '<div style="font-size:11px;color:var(--text-secondary);font-family:var(--font-sans)">' + lab + '</div>' + v;
+  e.style.background = 'rgba(127,119,221,' + (mag * 0.45).toFixed(2) + ')';
+}
+function ui() {
+  const hh = hist[hist.length - 1], m = hh.m;
+  $('mt').textContent = t.toFixed(1) + ' μs'; $('mc').textContent = (hh.coh / 2).toFixed(3); $('mp').textContent = hh.pur.toFixed(3);
+  const r00 = (1 + m[2]) / 2, r11 = (1 - m[2]) / 2, re = m[0] / 2, im = m[1] / 2,
+        f = (a, b) => a.toFixed(2) + (b < 0 ? ' − ' : ' + ') + Math.abs(b).toFixed(2) + 'i';
+  cell('r00', 'ρ₀₀', r00.toFixed(3), r00); cell('r01', 'ρ₀₁', f(re, -im), 2 * Math.hypot(re, im));
+  cell('r10', 'ρ₁₀', f(re, im), 2 * Math.hypot(re, im)); cell('r11', 'ρ₁₁', r11.toFixed(3), r11);
+}
+
+// ---- main loop & controls ---------------------------------------------------
+function loop() {
+  if (running && t < TMAX) { for (let i = 0; i < 6; i++) step(); rec(); }
+  drawB(); drawP(); ui(); requestAnimationFrame(loop);
+}
+['t1', 'tp', 'om', 'th', 'nn'].forEach(id => $(id).addEventListener('input', reset));
+$('rst').onclick = reset;
+$('play').onclick = () => { running = !running; $('play').textContent = running ? 'Pause' : 'Play'; };
+let drag = null; const bs = $('bs');
+bs.addEventListener('pointerdown', e => { drag = e.clientX; bs.setPointerCapture(e.pointerId); });
+bs.addEventListener('pointermove', e => { if (drag !== null) { az += (e.clientX - drag) * 0.01; drag = e.clientX; } });
+bs.addEventListener('pointerup', () => drag = null);
+reset(); loop();
+</script>
+</body>
+</html>
